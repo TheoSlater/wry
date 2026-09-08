@@ -109,6 +109,9 @@ impl InnerWebView {
     attributes: WebViewAttributes,
     pl_attrs: super::PlatformSpecificWebViewAttributes,
   ) -> Result<Self> {
+    if attributes.render_mode == crate::WebViewRenderMode::Composited {
+      return Err(Error::UnsupportedRenderMode);
+    }
     #[cfg(feature = "x11")]
     {
       Self::new_x11(window, attributes, pl_attrs, false)
@@ -127,6 +130,9 @@ impl InnerWebView {
     attributes: WebViewAttributes,
     pl_attrs: super::PlatformSpecificWebViewAttributes,
   ) -> Result<Self> {
+    if attributes.render_mode == crate::WebViewRenderMode::Composited {
+      return Err(Error::UnsupportedRenderMode);
+    }
     #[cfg(feature = "x11")]
     {
       Self::new_x11(parent, attributes, pl_attrs, true)
@@ -254,6 +260,7 @@ impl InnerWebView {
   where
     W: IsA<gtk::Container>,
   {
+    let hit_test_mode = attributes.hit_test_mode;
     // default_context allows us to create a scoped context on-demand
     let mut default_context;
     let web_context = if attributes.incognito {
@@ -345,6 +352,8 @@ impl InnerWebView {
       #[cfg(any(debug_assertions, feature = "devtools"))]
       is_inspector_open,
     };
+
+    w.set_hit_test_mode(hit_test_mode)?;
 
     // Initialize message handler
     w.init("Object.defineProperty(window, 'ipc', { value: Object.freeze({ postMessage: function(x) { window.webkit.messageHandlers['ipc'].postMessage(x) } }) })", true)?;
@@ -1023,6 +1032,13 @@ impl InnerWebView {
     #[cfg(feature = "x11")]
     self.set_visible_gtk(visible);
 
+    Ok(())
+  }
+
+  pub fn set_hit_test_mode(&self, mode: crate::HitTestMode) -> Result<()> {
+    self
+      .webview
+      .set_sensitive(mode == crate::HitTestMode::Normal);
     Ok(())
   }
 

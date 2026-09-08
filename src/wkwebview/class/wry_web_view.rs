@@ -2,14 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-License-Identifier: MIT
 
-use std::{collections::HashMap, sync::Mutex};
+use std::{cell::Cell, collections::HashMap, sync::Mutex};
 
 #[cfg(target_os = "macos")]
 use objc2::runtime::ProtocolObject;
 use objc2::{define_class, rc::Retained, runtime::Bool, DeclaredClass};
 #[cfg(target_os = "macos")]
 use objc2_app_kit::{NSDraggingDestination, NSEvent};
-use objc2_foundation::{NSObjectProtocol, NSUUID};
+use objc2_foundation::{NSObjectProtocol, NSPoint, NSUUID};
 
 #[cfg(target_os = "ios")]
 use crate::wkwebview::ios::WKWebView::WKWebView;
@@ -29,6 +29,8 @@ pub struct WryWebViewIvars {
   pub(crate) drag_drop_handler: Box<dyn Fn(DragDropEvent) -> bool>,
   #[cfg(target_os = "macos")]
   pub(crate) accept_first_mouse: objc2::runtime::Bool,
+  #[cfg(target_os = "macos")]
+  pub(crate) hit_test_mode: Cell<crate::HitTestMode>,
   #[cfg(target_os = "ios")]
   pub(crate) input_accessory_view_builder: Option<Box<crate::InputAccessoryViewBuilder>>,
   pub(crate) custom_protocol_task_ids: Mutex<HashMap<usize, Retained<NSUUID>>>,
@@ -41,6 +43,16 @@ define_class!(
 
   /// Overridden NSView methods.
   impl WryWebView {
+    #[cfg(target_os = "macos")]
+    #[unsafe(method(hitTest:))]
+    fn hit_test(&self, point: NSPoint) -> Option<Retained<objc2_app_kit::NSView>> {
+      if self.ivars().hit_test_mode.get() == crate::HitTestMode::Passthrough {
+        None
+      } else {
+        unsafe { objc2::msg_send![super(self), hitTest: point] }
+      }
+    }
+
     #[unsafe(method(performKeyEquivalent:))]
     fn perform_key_equivalent(&self, event: &NSEvent) -> Bool {
       // This is a temporary workaround for https://github.com/tauri-apps/tauri/issues/9426
@@ -123,6 +135,11 @@ define_class!(
 
 // Custom Protocol Task Checker
 impl WryWebView {
+  #[cfg(target_os = "macos")]
+  pub(crate) fn set_hit_test_mode(&self, mode: crate::HitTestMode) {
+    self.ivars().hit_test_mode.set(mode);
+  }
+
   pub(crate) fn add_custom_task_key(&self, task_id: usize) -> Retained<NSUUID> {
     let task_uuid = NSUUID::new();
     self

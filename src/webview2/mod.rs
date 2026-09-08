@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-License-Identifier: MIT
 
+mod composition;
+mod composition_input;
 mod drag_drop;
 mod util;
 
@@ -26,6 +28,7 @@ use windows::{
   },
 };
 
+use self::composition::CompositionWebViewController;
 use self::drag_drop::DragDropController;
 use super::Theme;
 use crate::{
@@ -61,6 +64,7 @@ pub(crate) struct InnerWebView {
   pub controller: ICoreWebView2Controller,
   pub webview: ICoreWebView2,
   pub env: ICoreWebView2Environment,
+  pub(crate) composition: Option<CompositionWebViewController>,
   // Store FileDropController in here to make sure it gets dropped when
   // the webview gets dropped, otherwise we'll have a memory leak
   #[allow(dead_code)]
@@ -69,11 +73,19 @@ pub(crate) struct InnerWebView {
 
 impl Drop for InnerWebView {
   fn drop(&mut self) {
-    let _ = unsafe { self.controller.Close() };
+    let composited = self.composition.is_some();
+    if let Some(composition) = self.composition.take() {
+      drop(composition);
+    }
+    if !composited {
+      let _ = unsafe { self.controller.Close() };
+    }
     if self.is_child {
       let _ = unsafe { DestroyWindow(self.hwnd) };
     }
-    unsafe { Self::dettach_parent_subclass(*self.parent.borrow()) }
+    if !composited {
+      unsafe { Self::dettach_parent_subclass(*self.parent.borrow()) }
+    }
   }
 }
 
@@ -114,34 +126,52 @@ impl InnerWebView {
   ) -> Result<Self> {
     let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
 
-    let hwnd = Self::create_container_hwnd(parent, &attributes, is_child)?;
+    let composited = attributes.render_mode == crate::WebViewRenderMode::Composited;
+    let hwnd = if composited {
+      parent
+    } else {
+      Self::create_container_hwnd(parent, &attributes, is_child)?
+    };
 
     let drop_handler = attributes.drag_drop_handler.take();
     let bounds = attributes.bounds;
 
-    let id = attributes
-      .id
-      .map(|id| id.to_string())
-      .unwrap_or_else(|| (hwnd.0 as isize).to_string());
+    let explicit_id = attributes.id.map(str::to_owned);
 
     let background_color = if attributes.transparent {
       Some((0, 0, 0, 0))
     } else {
       attributes.background_color
     };
+    let initial_hit_test_mode = attributes.hit_test_mode;
+    let initial_visible = attributes.visible;
 
     let env = if let Some(env) = &pl_attrs.environment {
       env.clone()
     } else {
       Self::create_environment(&attributes, pl_attrs.clone())?
     };
-    let controller = Self::create_controller(
-      hwnd,
-      &env,
-      attributes.incognito,
-      background_color,
-      pl_attrs.profile_name.as_deref(),
-    )?;
+    let (controller, composition) = if composited {
+      let composition = CompositionWebViewController::new(parent, &env, !is_child)?;
+      (composition.controller.clone(), Some(composition))
+    } else {
+      (
+        Self::create_controller(
+          hwnd,
+          &env,
+          attributes.incognito,
+          background_color,
+          pl_attrs.profile_name.as_deref(),
+        )?,
+        None,
+      )
+    };
+    let id = explicit_id.unwrap_or_else(|| {
+      composition
+        .as_ref()
+        .map(|composition| (composition.visual.as_raw() as usize).to_string())
+        .unwrap_or_else(|| (hwnd.0 as isize).to_string())
+    });
     let webview = Self::init_webview(
       parent,
       hwnd,
@@ -151,9 +181,10 @@ impl InnerWebView {
       &controller,
       pl_attrs,
       is_child,
+      composited,
     )?;
 
-    let drag_drop_controller = drop_handler.map(|handler| {
+    let drag_drop_controller = drop_handler.filter(|_| !composited).map(|handler| {
       // Disable file drops, so our handler can capture it
       unsafe {
         let _ = controller
@@ -171,8 +202,14 @@ impl InnerWebView {
       is_child,
       webview,
       env,
+      composition,
       drag_drop_controller,
     };
+
+    if let Some(composition) = &w.composition {
+      composition.set_hit_test_mode(initial_hit_test_mode);
+      composition.set_visible(initial_visible)?;
+    }
 
     if is_child {
       w.set_bounds(bounds.unwrap_or_default())?;
@@ -437,6 +474,7 @@ impl InnerWebView {
     controller: &ICoreWebView2Controller,
     pl_attrs: super::PlatformSpecificWebViewAttributes,
     is_child: bool,
+    composited: bool,
   ) -> Result<ICoreWebView2> {
     let webview = unsafe { controller.CoreWebView2()? };
 
@@ -475,7 +513,7 @@ impl InnerWebView {
     unsafe { Self::set_webview_settings(&webview, &attributes, &pl_attrs)? };
 
     // Webview handlers
-    unsafe { Self::attach_handlers(hwnd, &webview, &mut attributes, &mut token, env)? };
+    unsafe { Self::attach_handlers(hwnd, &webview, &mut attributes, &mut token, env, composited)? };
 
     // IPC handler
     if let Some(ipc_handler) = attributes.ipc_handler.take() {
@@ -602,7 +640,7 @@ impl InnerWebView {
     }
 
     // Subclass parent for resizing and focus
-    if !is_child {
+    if !is_child && !composited {
       unsafe { Self::attach_parent_subclass(parent, controller) };
     }
 
@@ -678,10 +716,16 @@ impl InnerWebView {
     attributes: &mut WebViewAttributes,
     token: &mut EventRegistrationToken,
     env: &ICoreWebView2Environment,
+    composited: bool,
   ) -> Result<()> {
     // Close container HWND when `window.close` is called in JS
     webview.add_WindowCloseRequested(
-      &WindowCloseRequestedEventHandler::create(Box::new(move |_, _| DestroyWindow(hwnd))),
+      &WindowCloseRequestedEventHandler::create(Box::new(move |_, _| {
+        if !composited {
+          let _ = DestroyWindow(hwnd);
+        }
+        Ok(())
+      })),
       token,
     )?;
 
@@ -1502,6 +1546,9 @@ impl InnerWebView {
   }
 
   pub fn bounds(&self) -> Result<Rect> {
+    if let Some(composition) = &self.composition {
+      return Ok(composition.bounds());
+    }
     let mut bounds = Rect::default();
     let mut rect = RECT::default();
     if self.is_child {
@@ -1536,14 +1583,26 @@ impl InnerWebView {
         bottom: size.height,
       })?;
 
-      SetWindowPos(
-        self.hwnd,
-        None,
-        position.x,
-        position.y,
-        size.width,
-        size.height,
-        SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE | SWP_NOZORDER,
+      if self.composition.is_none() {
+        SetWindowPos(
+          self.hwnd,
+          None,
+          position.x,
+          position.y,
+          size.width,
+          size.height,
+          SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE | SWP_NOZORDER,
+        )?;
+      }
+    }
+
+    if let Some(composition) = &self.composition {
+      composition.set_bounds(
+        Rect {
+          position: PhysicalPosition::new(position.x, position.y).into(),
+          size: PhysicalSize::new(size.width, size.height).into(),
+        },
+        1.0,
       )?;
     }
 
@@ -1566,18 +1625,36 @@ impl InnerWebView {
 
   pub fn set_visible(&self, visible: bool) -> Result<()> {
     unsafe {
-      let _ = ShowWindow(
-        self.hwnd,
-        match visible {
-          true => SW_SHOW,
-          false => SW_HIDE,
-        },
-      );
+      if self.composition.is_none() {
+        let _ = ShowWindow(
+          self.hwnd,
+          match visible {
+            true => SW_SHOW,
+            false => SW_HIDE,
+          },
+        );
+      }
 
-      self.controller.SetIsVisible(visible)?;
+      if let Some(composition) = &self.composition {
+        composition.set_visible(visible)?;
+      } else {
+        self.controller.SetIsVisible(visible)?;
+      }
     }
 
     Ok(())
+  }
+
+  pub fn set_hit_test_mode(&self, mode: crate::HitTestMode) -> Result<()> {
+    if let Some(composition) = &self.composition {
+      composition.set_hit_test_mode(mode);
+      return Ok(());
+    }
+    if mode == crate::HitTestMode::Passthrough {
+      Err(Error::UnsupportedRenderMode)
+    } else {
+      Ok(())
+    }
   }
 
   pub fn focus(&self) -> Result<()> {

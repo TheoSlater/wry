@@ -473,6 +473,13 @@ impl InnerWebView {
     Ok(())
   }
 
+  pub fn set_hit_test_mode(&self, mode: crate::HitTestMode) -> Result<()> {
+    if mode == crate::HitTestMode::Passthrough {
+      return Err(crate::Error::UnsupportedRenderMode);
+    }
+    Ok(())
+  }
+
   pub fn focus(&self) -> Result<()> {
     // Unsupported
     Ok(())

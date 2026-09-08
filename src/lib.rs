@@ -398,6 +398,8 @@ use self::webview2::*;
 use webview2_com::Microsoft::Web::WebView2::Win32::{
   ICoreWebView2, ICoreWebView2Controller, ICoreWebView2Environment,
 };
+#[cfg(target_os = "windows")]
+use windows::Win32::Graphics::DirectComposition::{IDCompositionDevice, IDCompositionVisual};
 
 use std::{borrow::Cow, collections::HashMap, path::PathBuf, rc::Rc};
 
@@ -534,8 +536,26 @@ pub struct NewWindowFeatures {
 /// An id for a webview
 pub type WebViewId<'a> = &'a str;
 
+/// Controls how a webview is hosted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum WebViewRenderMode {
+  #[default]
+  Windowed,
+  Composited,
+}
+
+/// Controls whether webview consumes pointer hit tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum HitTestMode {
+  #[default]
+  Normal,
+  Passthrough,
+}
+
 // WebViewAttributes is not stable enough to be pub.
 struct WebViewAttributes<'a> {
+  pub render_mode: WebViewRenderMode,
+  pub hit_test_mode: HitTestMode,
   /// An id that will be passed when this webview makes requests in certain callbacks.
   pub id: Option<WebViewId<'a>>,
 
@@ -851,6 +871,8 @@ struct WebViewAttributes<'a> {
 impl Default for WebViewAttributes<'_> {
   fn default() -> Self {
     Self {
+      render_mode: Default::default(),
+      hit_test_mode: Default::default(),
       id: Default::default(),
       context: None,
       user_agent: None,
@@ -935,6 +957,24 @@ impl<'a> WebViewBuilder<'a> {
   /// Set an id that will be passed when this webview makes requests in certain callbacks.
   pub fn with_id(mut self, id: WebViewId<'a>) -> Self {
     self.attrs.id = Some(id);
+    self
+  }
+
+  /// Select native windowed or composited/widget hosting.
+  ///
+  /// `Composited` uses native composition/widget hosting. On Windows it
+  /// requires a WebView2 runtime exposing `ICoreWebView2Environment3`.
+  pub fn with_render_mode(mut self, mode: WebViewRenderMode) -> Self {
+    self.attrs.render_mode = mode;
+    self
+  }
+
+  /// Select normal or pointer-passthrough hit testing.
+  ///
+  /// On Linux, passthrough disables GTK input for this widget. The embedding
+  /// application owns per-region routing through its overlay widgets.
+  pub fn with_hit_test_mode(mut self, mode: HitTestMode) -> Self {
+    self.attrs.hit_test_mode = mode;
     self
   }
 
@@ -2269,6 +2309,10 @@ impl WebView {
     self.webview.set_visible(visible)
   }
 
+  pub fn set_hit_test_mode(&self, mode: HitTestMode) -> Result<()> {
+    self.webview.set_hit_test_mode(mode)
+  }
+
   /// Try moving focus to the webview.
   pub fn focus(&self) -> Result<()> {
     self.webview.focus()
@@ -2370,8 +2414,21 @@ pub trait WebViewExtWindows {
   /// Attaches this webview to the given HWND and removes it from the current one.
   fn reparent(&self, hwnd: isize) -> Result<()>;
 
-  /// Returns the child HWND hosting this webview.
+  /// Returns the HWND hosting this webview.
+  ///
+  /// For a composited webview this is the parent HWND, not a browser child
+  /// window.
   fn hwnd(&self) -> windows::Win32::Foundation::HWND;
+
+  /// Returns the host visual for a composited webview.
+  ///
+  /// The returned visual is the shared DirectComposition root for its parent
+  /// window. Hosts may create visuals with [`Self::composition_device`] and
+  /// add them above/below webview visuals, then commit the device.
+  fn composition_root_visual(&self) -> Option<IDCompositionVisual>;
+
+  /// Returns the DirectComposition device used by a composited webview.
+  fn composition_device(&self) -> Option<IDCompositionDevice>;
 }
 
 #[cfg(target_os = "windows")]
@@ -2403,6 +2460,22 @@ impl WebViewExtWindows for WebView {
   /// Returns the child HWND hosting this webview.
   fn hwnd(&self) -> windows::Win32::Foundation::HWND {
     self.webview.hwnd()
+  }
+
+  fn composition_root_visual(&self) -> Option<IDCompositionVisual> {
+    self
+      .webview
+      .composition
+      .as_ref()
+      .map(|composition| composition.root_visual())
+  }
+
+  fn composition_device(&self) -> Option<IDCompositionDevice> {
+    self
+      .webview
+      .composition
+      .as_ref()
+      .map(|composition| composition.device())
   }
 }
 

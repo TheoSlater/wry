@@ -198,6 +198,10 @@ impl InnerWebView {
     pl_attrs: super::PlatformSpecificWebViewAttributes,
     is_child: bool,
   ) -> Result<Self> {
+    #[cfg(target_os = "ios")]
+    if attributes.render_mode == crate::WebViewRenderMode::Composited {
+      return Err(Error::UnsupportedRenderMode);
+    }
     let mtm = MainThreadMarker::new().ok_or(Error::NotMainThread)?;
 
     let webview_id = attributes
@@ -308,6 +312,8 @@ impl InnerWebView {
         },
         #[cfg(target_os = "macos")]
         accept_first_mouse: Bool::new(attributes.accept_first_mouse),
+        #[cfg(target_os = "macos")]
+        hit_test_mode: std::cell::Cell::new(attributes.hit_test_mode),
         #[cfg(target_os = "ios")]
         input_accessory_view_builder: pl_attrs.input_accessory_view_builder,
         custom_protocol_task_ids: Default::default(),
@@ -1051,6 +1057,16 @@ impl InnerWebView {
 
   pub fn set_visible(&self, visible: bool) -> Result<()> {
     self.webview.setHidden(!visible);
+    Ok(())
+  }
+
+  pub fn set_hit_test_mode(&self, mode: crate::HitTestMode) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    self.webview.set_hit_test_mode(mode);
+    #[cfg(target_os = "ios")]
+    if mode == crate::HitTestMode::Passthrough {
+      return Err(Error::UnsupportedRenderMode);
+    }
     Ok(())
   }
 

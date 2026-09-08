@@ -53,6 +53,8 @@ pub enum Error {
   WindowHandleError(#[from] raw_window_handle::HandleError),
   #[error("the window handle kind is not supported")]
   UnsupportedWindowHandle,
+  #[error("requested webview render mode is not supported by this backend")]
+  UnsupportedRenderMode,
   #[error(transparent)]
   Utf8Error(#[from] std::str::Utf8Error),
   #[cfg(target_os = "android")]
