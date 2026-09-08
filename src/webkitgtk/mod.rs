@@ -985,6 +985,11 @@ impl InnerWebView {
     }
 
     if self.is_in_fixed_parent {
+      if let Some(parent) = self.webview.parent() {
+        if let Some(fixed) = parent.downcast_ref::<gtk::Fixed>() {
+          fixed.move_(&self.webview, x, y);
+        }
+      }
       self
         .webview
         .size_allocate(&gtk::Allocation::new(x, y, width, height));
