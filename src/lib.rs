@@ -435,6 +435,31 @@ impl Default for Rect {
   }
 }
 
+const MAX_BOUNDS_VALUE: f64 = 100_000.0;
+
+fn validate_bounds(bounds: Option<Rect>) -> Result<()> {
+  let Some(bounds) = bounds else {
+    return Ok(());
+  };
+  let position = bounds.position.to_logical::<f64>(1.0);
+  let size = bounds.size.to_logical::<f64>(1.0);
+  let valid = position.x.is_finite()
+    && position.y.is_finite()
+    && size.width.is_finite()
+    && size.height.is_finite()
+    && position.x.abs() <= MAX_BOUNDS_VALUE
+    && position.y.abs() <= MAX_BOUNDS_VALUE
+    && size.width >= 0.0
+    && size.height >= 0.0
+    && size.width <= MAX_BOUNDS_VALUE
+    && size.height <= MAX_BOUNDS_VALUE;
+  if valid {
+    Ok(())
+  } else {
+    Err(Error::InvalidBounds)
+  }
+}
+
 /// Resolves a custom protocol [`Request`] asynchronously.
 ///
 /// See [`WebViewBuilder::with_asynchronous_custom_protocol`] for more information.
@@ -1582,6 +1607,7 @@ impl<'a> WebViewBuilder<'a> {
   /// - Panics on Linux, if [`gtk::init`] was not called in this thread.
   pub fn build<W: HasWindowHandle>(self, window: &'a W) -> Result<WebView> {
     self.error?;
+    validate_bounds(self.attrs.bounds)?;
 
     InnerWebView::new(window, self.attrs, self.platform_specific).map(|webview| WebView { webview })
   }
@@ -1610,6 +1636,7 @@ impl<'a> WebViewBuilder<'a> {
   /// - Panics on Linux, if [`gtk::init`] was not called in this thread.
   pub fn build_as_child<W: HasWindowHandle>(self, window: &'a W) -> Result<WebView> {
     self.error?;
+    validate_bounds(self.attrs.bounds)?;
 
     InnerWebView::new_as_child(window, self.attrs, self.platform_specific)
       .map(|webview| WebView { webview })
@@ -2103,6 +2130,7 @@ impl<'a> WebViewBuilderExtUnix<'a> for WebViewBuilder<'a> {
     W: gtk::prelude::IsA<gtk::Container>,
   {
     self.error?;
+    validate_bounds(self.attrs.bounds)?;
 
     InnerWebView::new_gtk(widget, self.attrs, self.platform_specific)
       .map(|webview| WebView { webview })
@@ -2305,6 +2333,7 @@ impl WebView {
   /// On Linux GTK, the bounds are logical client coordinates relative to that
   /// `GtkFixed`; Wry converts them to the widget's physical allocation once.
   pub fn set_bounds(&self, bounds: Rect) -> Result<()> {
+    validate_bounds(Some(bounds))?;
     self.webview.set_bounds(bounds)
   }
 
@@ -2703,6 +2732,16 @@ pub struct InitializationScript {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn rejects_invalid_bounds() {
+    let invalid = Rect {
+      position: dpi::LogicalPosition::new(0.0, 0.0).into(),
+      size: dpi::LogicalSize::new(-1.0, 1.0).into(),
+    };
+    assert!(validate_bounds(Some(invalid)).is_err());
+    assert!(validate_bounds(Some(Rect::default())).is_ok());
+  }
 
   #[test]
   #[cfg_attr(miri, ignore)]

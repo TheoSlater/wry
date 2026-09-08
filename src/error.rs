@@ -55,6 +55,8 @@ pub enum Error {
   UnsupportedWindowHandle,
   #[error("requested webview render mode is not supported by this backend")]
   UnsupportedRenderMode,
+  #[error("invalid webview bounds")]
+  InvalidBounds,
   #[error(transparent)]
   Utf8Error(#[from] std::str::Utf8Error),
   #[cfg(target_os = "android")]
