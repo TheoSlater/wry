@@ -2069,8 +2069,10 @@ pub trait WebViewBuilderExtUnix<'a> {
   /// Consume the builder and create the webview inside a GTK container widget, such as GTK window.
   ///
   /// - If the container is [`gtk::Box`], it is added using [`Box::pack_start(webview, true, true, 0)`](gtk::prelude::BoxExt::pack_start).
-  /// - If the container is [`gtk::Fixed`], its [size request](gtk::prelude::WidgetExt::set_size_request) will be set using the (width, height) bounds passed in
-  ///   and will be added to the container using [`Fixed::put`](gtk::prelude::FixedExt::put) using the (x, y) bounds passed in.
+  /// - If the container is [`gtk::Fixed`], a minimal [size request](gtk::prelude::WidgetExt::set_size_request)
+  ///   is used and the webview is added using [`Fixed::put`](gtk::prelude::FixedExt::put).
+  ///   Later [`WebView::set_bounds`] calls use explicit GTK allocations and do not update the size request,
+  ///   so resizing the webview cannot resize the containing window.
   /// - For all other containers, it will be added using [`gtk::prelude::ContainerExt::add`]
   ///
   /// # Panics:
@@ -2300,6 +2302,8 @@ impl WebView {
   ///
   /// This is only effective if the webview was created as a child
   /// or created using [`WebViewBuilderExtUnix::build_gtk`] with [`gtk::Fixed`].
+  /// On Linux GTK, the bounds are logical client coordinates relative to that
+  /// `GtkFixed`; Wry converts them to the widget's physical allocation once.
   pub fn set_bounds(&self, bounds: Rect) -> Result<()> {
     self.webview.set_bounds(bounds)
   }
@@ -2485,8 +2489,9 @@ pub trait WebViewExtUnix: Sized {
   /// Create the webview inside a GTK container widget, such as GTK window.
   ///
   /// - If the container is [`gtk::Box`], it is added using [`Box::pack_start(webview, true, true, 0)`](gtk::prelude::BoxExt::pack_start).
-  /// - If the container is [`gtk::Fixed`], its [size request](gtk::prelude::WidgetExt::set_size_request) will be set using the (width, height) bounds passed in
-  ///   and will be added to the container using [`Fixed::put`](gtk::prelude::FixedExt::put) using the (x, y) bounds passed in.
+  /// - If the container is [`gtk::Fixed`], a minimal [size request](gtk::prelude::WidgetExt::set_size_request)
+  ///   is used and the webview is added using [`Fixed::put`](gtk::prelude::FixedExt::put).
+  ///   Later bounds updates use explicit GTK allocations and do not update the size request.
   /// - For all other containers, it will be added using [`gtk::prelude::ContainerExt::add`]
   ///
   /// # Panics:

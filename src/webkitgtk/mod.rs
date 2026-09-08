@@ -93,7 +93,7 @@ pub(crate) struct InnerWebView {
   is_inspector_open: Arc<AtomicBool>,
   pending_scripts: Arc<Mutex<Option<Vec<String>>>>,
   is_in_fixed_parent: bool,
-  fixed_size_request_cleared: Cell<bool>,
+  requested_bounds: Rc<Cell<Rect>>,
 
   #[cfg(feature = "x11")]
   x11: Option<X11Data>,
@@ -297,6 +297,7 @@ impl InnerWebView {
     }
 
     let webview = Self::create_webview(web_context, &attributes, &pl_attrs);
+    let requested_bounds = Rc::new(Cell::new(attributes.bounds.unwrap_or_default()));
 
     // Transparent
     if attributes.transparent {
@@ -333,6 +334,20 @@ impl InnerWebView {
 
     let is_in_fixed_parent = Self::add_to_container(&webview, container, &attributes);
 
+    if is_in_fixed_parent {
+      if let Some(parent) = webview.parent() {
+        if let Some(fixed) = parent.downcast_ref::<gtk::Fixed>() {
+          let webview_weak = webview.downgrade();
+          let requested_bounds = requested_bounds.clone();
+          fixed.connect_size_allocate(move |_, _| {
+            if let Some(webview) = webview_weak.upgrade() {
+              Self::allocate_fixed_webview(&webview, requested_bounds.get());
+            }
+          });
+        }
+      }
+    }
+
     #[cfg(any(debug_assertions, feature = "devtools"))]
     let is_inspector_open = Self::attach_inspector_handlers(&webview);
 
@@ -348,7 +363,7 @@ impl InnerWebView {
       pending_scripts: Arc::new(Mutex::new(Some(Vec::new()))),
 
       is_in_fixed_parent,
-      fixed_size_request_cleared: Cell::new(false),
+      requested_bounds,
       #[cfg(feature = "x11")]
       x11: None,
 
@@ -705,19 +720,16 @@ impl InnerWebView {
         .unwrap()
         .pack_start(webview, true, true, 0);
     } else if container_type == "GtkFixed" {
-      let scale_factor = webview.scale_factor() as f64;
-      let (width, height) = attributes
-        .bounds
-        .map(|b| b.size.to_logical::<i32>(scale_factor))
-        .map(Into::into)
-        .unwrap_or((1, 1));
       let (x, y) = attributes
         .bounds
-        .map(|b| b.position.to_logical::<i32>(scale_factor))
+        .map(|b| b.position.to_logical::<i32>(webview.scale_factor() as f64))
         .map(Into::into)
         .unwrap_or((0, 0));
 
-      webview.set_size_request(width, height);
+      // GtkFixed uses the child's request for its preferred size, not as
+      // explicit runtime geometry. Keep the request minimal; both initial
+      // and subsequent bounds are applied through size allocation below.
+      webview.set_size_request(1, 1);
 
       container
         .dynamic_cast_ref::<gtk::Fixed>()
@@ -730,6 +742,16 @@ impl InnerWebView {
     }
 
     is_in_fixed_parent
+  }
+
+  fn allocate_fixed_webview(webview: &WebView, bounds: Rect) {
+    // `Rect` is expressed in logical coordinates relative to the GtkFixed
+    // parent. GTK allocations use physical widget coordinates, so apply the
+    // widget scale factor exactly once here.
+    let scale_factor = webview.scale_factor() as f64;
+    let (width, height) = bounds.size.to_logical::<i32>(scale_factor).into();
+    let (x, y) = bounds.position.to_logical::<i32>(scale_factor).into();
+    webview.size_allocate(&gtk::Allocation::new(x, y, width, height));
   }
 
   fn attach_ipc_handler(webview: WebView, ipc_handler: Box<dyn Fn(Request<String>)>) {
@@ -976,7 +998,7 @@ impl InnerWebView {
     let scale_factor = self.webview.scale_factor() as f64;
     let (width, height) = bounds.size.to_logical::<i32>(scale_factor).into();
     let (x, y) = bounds.position.to_logical::<i32>(scale_factor).into();
-
+    self.requested_bounds.set(bounds);
     #[cfg(feature = "x11")]
     if let Some(x11_data) = &self.x11 {
       let window = &x11_data.gtk_window;
@@ -988,30 +1010,18 @@ impl InnerWebView {
     }
 
     if self.is_in_fixed_parent {
-      // The initial bounds establish the GtkFixed child request. Runtime
-      // bounds must be applied as an allocation instead: updating the request
-      // here would change the fixed parent's preferred size and can make the
-      // containing native window resize itself in response.
-      if !self.fixed_size_request_cleared.replace(true) {
-        self.webview.set_size_request(-1, -1);
-      }
       if let Some(parent) = self.webview.parent() {
         if let Some(fixed) = parent.downcast_ref::<gtk::Fixed>() {
-          fixed.move_(&self.webview, x, y);
+          // GtkFixed owns child allocations. Keep its explicit position
+          // synchronized, then reapply the requested allocation after GTK's
+          // next layout pass. The initial size request is intentionally left
+          // unchanged so bounds updates cannot resize the containing window.
+          if fixed.child_x(&self.webview) != x || fixed.child_y(&self.webview) != y {
+            fixed.move_(&self.webview, x, y);
+          }
+          Self::allocate_fixed_webview(&self.webview, bounds);
         }
       }
-      self
-        .webview
-        .size_allocate(&gtk::Allocation::new(x, y, width, height));
-      let allocation = self.webview.allocation();
-      eprintln!(
-        "wry: webview allocation={}x{}+{}+{} visible={}",
-        allocation.width(),
-        allocation.height(),
-        allocation.x(),
-        allocation.y(),
-        self.webview.is_visible()
-      );
     }
 
     Ok(())
