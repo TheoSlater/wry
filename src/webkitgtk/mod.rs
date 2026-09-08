@@ -29,6 +29,7 @@ use std::ffi::c_ulong;
 #[cfg(any(debug_assertions, feature = "devtools"))]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
+  cell::Cell,
   collections::HashMap,
   rc::Rc,
   sync::{Arc, Mutex},
@@ -92,6 +93,7 @@ pub(crate) struct InnerWebView {
   is_inspector_open: Arc<AtomicBool>,
   pending_scripts: Arc<Mutex<Option<Vec<String>>>>,
   is_in_fixed_parent: bool,
+  fixed_size_request_cleared: Cell<bool>,
 
   #[cfg(feature = "x11")]
   x11: Option<X11Data>,
@@ -346,6 +348,7 @@ impl InnerWebView {
       pending_scripts: Arc::new(Mutex::new(Some(Vec::new()))),
 
       is_in_fixed_parent,
+      fixed_size_request_cleared: Cell::new(false),
       #[cfg(feature = "x11")]
       x11: None,
 
@@ -985,6 +988,13 @@ impl InnerWebView {
     }
 
     if self.is_in_fixed_parent {
+      // The initial bounds establish the GtkFixed child request. Runtime
+      // bounds must be applied as an allocation instead: updating the request
+      // here would change the fixed parent's preferred size and can make the
+      // containing native window resize itself in response.
+      if !self.fixed_size_request_cleared.replace(true) {
+        self.webview.set_size_request(-1, -1);
+      }
       if let Some(parent) = self.webview.parent() {
         if let Some(fixed) = parent.downcast_ref::<gtk::Fixed>() {
           fixed.move_(&self.webview, x, y);
@@ -993,6 +1003,15 @@ impl InnerWebView {
       self
         .webview
         .size_allocate(&gtk::Allocation::new(x, y, width, height));
+      let allocation = self.webview.allocation();
+      eprintln!(
+        "wry: webview allocation={}x{}+{}+{} visible={}",
+        allocation.width(),
+        allocation.height(),
+        allocation.x(),
+        allocation.y(),
+        self.webview.is_visible()
+      );
     }
 
     Ok(())
